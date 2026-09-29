@@ -1,0 +1,7 @@
+
+.env
+seen_guids.txt
+__pycache__/
+*.pyc
+venv/
+.venv/
