@@ -32,6 +32,11 @@ def _is_credential_form(tag):
     names = {i.get("name") for i in tag.find_all("input")}
     return "username" in names and "password" in names
 
+def _looks_gated(html):    
+    if GATE_MARKER in html:
+        return True
+    soup = BeautifulSoup(html, "html.parser")
+    return soup.find(_is_credential_form) is not None
 
 def login(session, username, password):
     try:

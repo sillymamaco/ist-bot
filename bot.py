@@ -66,27 +66,36 @@ class Bot:
             self.db.add(guid)
         return True
 
-    def sweep(self):
-        posted = 0
-        for course, info in COURSES.items():
-            url = info["url"]
+from fenix import AuthError, GatedError   # make sure GatedError is imported
+
+def sweep(self):
+    posted = 0
+    for course, info in COURSES.items():
+        url = info["url"]
+        entries = None
+        for attempt in (1, 2):
             try:
                 entries = fenix.fetch_listing(url, self.session)
+                break
+            except GatedError:
+                print(f"Listing gated for {course}, re-logging in")
+                self.authed = False
+                self.session.cookies.clear()
+                if not self.ensure_auth():
+                    print(f"Re-login failed, skipping {course} this sweep")
+                    break
             except Exception as e:
                 print(f"Error fetching {url}: {e}")
-                continue
-            for entry in reversed(entries):
-                try:
-                    if self.process_entry(entry, course):
-                        posted += 1
-                except Exception as e:
-                    print(f"Error processing {entry.get('guid')}: {e}")
-        if HEALTHCHECK_URL:
+                break
+        if entries is None:
+            continue
+        for entry in reversed(entries):
             try:
-                requests.get(HEALTHCHECK_URL, timeout=10)
+                if self.process_entry(entry, course):
+                    posted += 1
             except Exception as e:
-                print(f"Healthcheck ping failed: {e}")
-        return posted
+                print(f"Error processing {entry.get('guid')}: {e}")
+    return posted
         
 def main():
     parser = argparse.ArgumentParser()
