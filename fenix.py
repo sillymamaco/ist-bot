@@ -1,3 +1,10 @@
+"""Talking to Fenix: CAS login, course-page scraping, gated body fetching.
+
+Course base pages publicly list "Últimos anúncios" (title + ver-post link +
+date); only bodies need login. Entries are plain dicts:
+{guid, title, link, published, summary}, newest-first from every fetcher.
+"""
+
 import logging
 from urllib.parse import urljoin
 
@@ -15,10 +22,11 @@ HEADINGS = ("h1", "h2", "h3", "h4", "h5", "h6")
 
 
 class AuthError(RuntimeError):
-    
+    """Login failures (never carries the password, never auto-retried)."""
+
 
 class GatedError(RuntimeError):
-    
+    """Page rendered the login gate (session missing/expired)."""
 
 
 def _is_section_heading(tag):
@@ -32,13 +40,17 @@ def _is_credential_form(tag):
     names = {i.get("name") for i in tag.find_all("input")}
     return "username" in names and "password" in names
 
-def _looks_gated(html):    
+def _looks_gated(html):
+    """True if Fenix served a login page instead of the course page.
+    Happens when the CAS session has expired: the stale cookie makes
+    Fenix redirect to the login flow."""
     if GATE_MARKER in html:
         return True
     soup = BeautifulSoup(html, "html.parser")
     return soup.find(_is_credential_form) is not None
-
+    
 def login(session, username, password):
+    """Establish an authenticated session. Raises AuthError on any failure."""
     try:
         response = session.get(LOGIN_URL, timeout=TIMEOUT)
     except requests.RequestException as e:
@@ -62,6 +74,8 @@ def login(session, username, password):
                 raise AuthError("Fenix login failed: credentials rejected")
             log.info("Fenix login OK (user %s)", username)
             return
+        # No form yet (login-method chooser): only follow an onward CAS link,
+        # never an arbitrary one.
         next_hop = None
         for link in soup.find_all("a", href=True):
             if "cas/login" in link["href"] or "id.tecnico.ulisboa.pt" in link["href"]:
@@ -77,6 +91,12 @@ def login(session, username, password):
 
 
 def parse_listing(html, page_url):
+    """Extract announcements from a course base page (newest first).
+
+    Items are h5 > a[href*=ver-post] + date <p>, in the block after the
+    "Últimos anúncios" heading. [] means section missing (structure changed)
+    or section empty (nothing published yet) — caller tells them apart.
+    """
     soup = BeautifulSoup(html, "html.parser")
     heading = soup.find(_is_section_heading)
     if heading is None:
@@ -106,6 +126,10 @@ def parse_listing(html, page_url):
 
 
 def fetch_listing(page_url, session):
+    """Fetch + parse one course page (newest first). [] on any failure.
+
+    Retries once on a connection error: phones drop idle keep-alive sockets
+    between sweeps, and the next request gets RST from the peer."""
     response = None
     for attempt in range(2):
         try:
@@ -117,6 +141,8 @@ def fetch_listing(page_url, session):
                 continue
             log.warning("Skipping %s: fetch failed: %s", page_url, e)
             return []
+    if _looks_gated(response.text):
+        raise GatedError(page_url)
     if response.status_code >= 400:
         log.warning("Skipping %s: HTTP %s", page_url, response.status_code)
         return []
@@ -132,6 +158,11 @@ def fetch_listing(page_url, session):
 
 
 def parse_body(html):
+    """Extract body text from a ver-post page. "" when nothing plausible.
+
+    Strips the announcement's author/date header block (Fénix marks it
+    <p class="small">) and the title heading (which would otherwise be
+    duplicated inside the Discord embed description)."""
     soup = BeautifulSoup(html, "html.parser")
     for chrome in soup(["script", "style", "nav", "header", "footer", "aside"]):
         chrome.decompose()
@@ -148,10 +179,14 @@ def parse_body(html):
         if divs:
             candidates.append(max(divs, key=lambda d: len(d.get_text())))
     for el in candidates:
+        
         for meta in el.select("p.small"):
             meta.decompose()
+        
         for heading in el.select("h1, h2, h3, h4, h5, h6"):
-            heading.decompose()
+            a = heading.find("a", href=True)
+            if a and POST_MARKER in a["href"]:
+                heading.decompose()
         text = " ".join(el.get_text(separator=" ", strip=True).split())
         if len(text) >= 40:
             return text
@@ -159,6 +194,10 @@ def parse_body(html):
 
 
 def fetch_body(session, ver_post_url):
+    """Fetch one body. "" when unavailable. GatedError on the login gate
+    (caller re-logs in and retries once). Never raises otherwise.
+
+    Retries once on a connection error, same reason as fetch_listing."""
     response = None
     for attempt in range(2):
         try:

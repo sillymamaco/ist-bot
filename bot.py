@@ -20,19 +20,25 @@ class Bot:
         self.session.headers["User-Agent"] = "ist-announcements-webhook/2.0"
         self.session.headers["Connection"] = "close"
         self.authed = False
+        self.last_login = 0.0
+        self.relogin_every = 3 * 3600
 
-    def ensure_auth(self):
-        if not FENIX_USERNAME or self.authed:
-            return self.authed
+    def ensure_auth(self, force=False):
+        if not FENIX_USERNAME:
+             return False
+        if not force and self.authed and (time.time() - self.last_login) < self.relogin_every:
+             return True
         try:
+            self.session.cookies.clear()
             fenix.login(self.session, FENIX_USERNAME, FENIX_PASSWORD)
         except AuthError as e:
             print(f"Fenix login failed: {e}")
+            self.authed = False
             return False
         self.authed = True
+        self.last_login = time.time()
         print("Fenix login OK")
         return True
-
     def enrich(self, entry):
         
         if entry.get("summary") or not self.ensure_auth():
@@ -67,6 +73,9 @@ class Bot:
         return True
 
     def sweep(self):
+        if not self.ensure_auth():
+            print("Auth failed; skipping sweep")
+            return 0
         posted = 0
         for course, info in COURSES.items():
             url = info["url"]
@@ -101,7 +110,7 @@ class Bot:
                 print(f"Healthcheck ping failed: {e}")
 
         return posted
-        
+            
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
